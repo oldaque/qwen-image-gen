@@ -229,16 +229,23 @@ existe (o Dokploy a cria na instalacao).
 
    Para gerar de verdade, troque para `fal` + `FAL_KEY=...` ou `remote_gpu` +
    `REMOTE_GPU_URL=...`.
-5. **Porta**: o servico `web` publica `8080:8000` no host. Em `Advanced` -> `Ports`,
-   mapeie a porta do host que quiser (ex.: `8080`) para o container `8000`; o Dokploy
-   mostra o mapeamento do compose na aba `General`.
+5. **Acesso**: quem expoe a app e o **Traefik do Dokploy**, nas portas 80/443 (ja
+   liberadas na rede da VM). O servico `web` entra na `dokploy-network` e ja leva as
+   labels de Traefik no compose, incluindo um router *catch-all* de prioridade 1 —
+   os routers com `Host(...)` explicito (o painel do Dokploy, por exemplo) continuam
+   vencendo, porque tem prioridade maior. Resultado: `http://<ip-da-vm>/` entrega a
+   webapp sem precisar abrir porta nenhuma no firewall.
+   O mapeamento direto `8080:8000` segue no compose apenas para debug local ou por
+   tunel SSH; a porta 8080 costuma estar fechada no security list da nuvem.
 6. **Deploy**: `Deploy`. Acompanhe o build (a imagem `python:3.12-slim` tem manifest
    arm64, entao builda nativo na VM). O healthcheck
    (`curl -f http://localhost:8000/api/v1/health`) precisa passar para o container ficar
    `healthy`.
-7. **Dominio (depois)**: aba `Domains` -> `Add Domain`, aponte o DNS para o servidor e
-   deixe o Traefik do Dokploy cuidar do TLS. Nao ha labels de Traefik no compose de
-   proposito: o Dokploy injeta as dele quando um dominio e atribuido.
+7. **Dominio (opcional)**: crie um registro A apontando para o IP da VM e troque a
+   `rule` dos dois routers no `docker-compose.dokploy.yml` de ``PathPrefix(`/`)`` por
+   ``Host(`img.seu-dominio.com`)``, descomentando o bloco `websecure` — o Traefik emite
+   o certificado via Let's Encrypt sozinho. Sem dominio, o acesso por IP em HTTP
+   continua funcionando.
 8. **ComfyUI local (opcional)**: so se `IMAGE_PROVIDER=local_comfy`. Build sua imagem
    arm64 (esboco comentado no `docker-compose.dokploy.yml`), publique-a num registry,
    defina `COMFY_IMAGE=<sua-imagem>` e suba com `--profile local`. Sem isso o servico
@@ -275,15 +282,18 @@ Volume: `appdata` montado em `/data` (SQLite + imagens). O usuario do container 
 Exemplo:
 
 ```bash
-curl -s -X POST http://localhost:8080/api/v1/jobs \
+# local: http://localhost:8080 (uvicorn direto) · na VM: http://<ip-da-vm>/ (Traefik, porta 80)
+BASE=http://localhost:8080
+
+curl -s -X POST $BASE/api/v1/jobs \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"gato astronauta em aquarela","width":1024,"height":1024,"num_images":1}' | jq
 
 # acompanhar por SSE
-curl -N http://localhost:8080/api/v1/jobs/<job_id>/events
+curl -N $BASE/api/v1/jobs/<job_id>/events
 
 # baixar a imagem
-curl -OJ http://localhost:8080/api/v1/images/<image_id>
+curl -OJ $BASE/api/v1/images/<image_id>
 ```
 
 `JobCreate`: `prompt` (1..4000, obrigatorio), `negative_prompt`, `width`/`height`
@@ -423,5 +433,5 @@ web/                 index.html + app.js + styles.css (SPA servida em /)
 scripts/             download_models.sh (pesos) e smoke_test.sh (fumaca ponta-a-ponta)
 tests/               test_api.py, test_providers.py, conftest.py
 Dockerfile           python:3.12-slim arm64, usuario nao-root, HEALTHCHECK em /api/v1/health
-docker-compose.dokploy.yml   web (8080:8000, volume appdata:/data) + comfy (profile local)
+docker-compose.dokploy.yml   web (Traefik + volume appdata:/data) + comfy (profile local)
 ```

@@ -27,6 +27,9 @@ services:
     image: image-gen-web:${APP_VERSION:-0.1.0}
     restart: unless-stopped
     init: true
+    # Publicacao direta: uteis apenas para debug local/tunel SSH. O acesso
+    # normal NAO deve vir por aqui — o roteamento e do Traefik (labels abaixo),
+    # nas portas 80/443, que ja estao liberadas na rede da VM.
     ports:
       - "8080:8000"
     env_file:
@@ -49,6 +52,38 @@ services:
     networks:
       - default
       - dokploy-network
+    # ---------------------------------------------------------------------
+    # ROTEAMENTO — o Traefik do Dokploy e quem expoe a app, nas portas 80/443
+    # (ja liberadas). A app entra na dokploy-network e o Traefik a alcanca ali.
+    #
+    # ATIVO: acesso por IP, sem DNS. Router "catch-all" com prioridade 1: os
+    # routers com Host(...) explicitos (o painel do Dokploy, por exemplo) tem
+    # prioridade maior e continuam vencendo. Assim http://<ip-da-vm>/ entrega a
+    # webapp mesmo sem dominio configurado.
+    #
+    # PARA USAR UM DOMINIO (ex: img.SEUDOMINIO.com): crie um registro A
+    # apontando para o IP da VM e troque a rule abaixo por
+    #   Host(`img.SEUDOMINIO.com`)
+    # nos DOIS routers, descomentando o bloco websecure para ganhar TLS
+    # automatico via Let's Encrypt.
+    # ---------------------------------------------------------------------
+    labels:
+      - traefik.enable=true
+      # Sem isto o Traefik pode escolher a rede errada quando o container
+      # participa de mais de uma.
+      - traefik.docker.network=dokploy-network
+      # Porta interna do container (uvicorn).
+      - traefik.http.services.imagegen-web.loadbalancer.server.port=8000
+      # HTTP (porta 80) — catch-all de prioridade baixa.
+      - traefik.http.routers.imagegen-web.rule=PathPrefix(`/`)
+      - traefik.http.routers.imagegen-web.entrypoints=web
+      - traefik.http.routers.imagegen-web.priority=1
+      - traefik.http.routers.imagegen-web.service=imagegen-web
+      # TLS (porta 443). Hoje desligado: Let's Encrypt nao emite certificado
+      # para IP, entao este router so passa a valer quando houver dominio.
+      # - traefik.http.routers.imagegen-websecure.rule=Host(`img.SEUDOMINIO.com`)
+      # - traefik.http.routers.imagegen-websecure.entrypoints=websecure
+      # - traefik.http.routers.imagegen-websecure.tls.certresolver=letsencrypt
 
   # ---------------------------------------------------------------------------
   # ComfyUI local (CPU, arm64). Perfil "local": NAO sobe por padrao.
