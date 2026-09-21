@@ -21,28 +21,40 @@ navegador ──> FastAPI (/, /api/v1/*) ──> fila asyncio ──> provider �
 ## Leia isto antes de tudo: a realidade de hardware
 
 O alvo deste projeto e uma **VM ARM64 sem GPU**, com poucos vCPU (~4) e ~23 GB de RAM,
-alem de ~40 GB de disco livre. Nessa maquina, **gerar localmente e viavel, mas lento**.
-Os numeros abaixo sao estimativas para essa classe de hardware: as medicoes de GEMM
-desta secao sao diretas, mas os tempos de geracao sao extrapolacao de ancoras x86/ARM
-(nao existe benchmark publicado do Qwen-Image-2.1 em CPU ARM), com incerteza de **±2-3x**.
+alem de ~40 GB de disco livre.
+
+> **Funciona, e nao vai rolar — o motivo e infraestrutura.** O caminho local foi executado ponta a
+> ponta nesta classe de VM e **gerou imagem**, a **129,74 s/step** (medido). Uma imagem 512² com
+> 4 steps leva ~13 min; o preset oficial (1024², 25 steps) levaria ~3,6 h. O impedimento e o
+> hardware (ARM sem GPU, sem `bf16`/`i8mm`), nao o modelo, o codigo ou a quantizacao. Por isso
+> `local_comfy` fica desligado por default; para uso interativo, use `fal` ou `remote_gpu`.
+> Numeros medidos, contrato de nos verificado e como reproduzir:
+> **[`docs/LOCAL-INFERENCE.md`](docs/LOCAL-INFERENCE.md)**.
 
 ### Tempo por imagem no caminho local (`local_comfy` em CPU arm64)
 
-| Resolucao | Estimativa | Observacao |
-|---|---|---|
-| 512² / 8 steps | ~3-15 min | melhor caso defensavel; ancoras x86 extrapoladas |
-| **1024²** | **~30 min a ~4,5 h** | faixa estimada: 30-90 min (set quantizado), 2h20-3h40 (GGUF Q4_K, 40 steps), ~4,5 h (ComfyUI fp32, 25 steps) |
-| 2048² | ~11-18 h | atencao de 16.384 tokens domina |
+Numeros **medidos** nesta classe de hardware: 1 step = 129,74 s a 512². O custo por step escala
+com o numero de tokens de imagem (4x de 512² para 1024²) e a atencao cresce mais rapido, entao
+1024² e piso; a coluna da direita e extrapolacao marcada.
 
-Custo fixo por imagem, mesmo com o DiT instantaneo: text encoder Qwen3-VL-8B
-~20-60 s/prompt (cacheavel entre jobs) + decode do VAE 64 canais/16x ~20-60 s.
+| Resolucao / steps | Tempo |
+|---|---|
+| **512² / 4 steps** | **~13 min** (medido) |
+| 512² / 8 steps | ~21 min (extrapolado) |
+| 1024² / 4 steps | ~39 min (extrapolado) |
+| 1024² / 25 steps (preset oficial) | **~3,6 h** (extrapolado) |
+| 2048² (nativo do modelo) | ~35 min **por step** (extrapolado) |
+
+RAM no pico da inferencia: **5 GB de 23 GB** (medido) — memoria nunca foi o gargalo aqui, compute e.
+Custo fixo por imagem: ~4 min para carregar os 11 GB do disco (a ~53 MB/s) + text encoder
+Qwen3-VL-8B + decode do VAE 64 canais/16x.
 
 ### RAM: o bf16 nao cabe, o quantizado cabe
 
 | Configuracao | Pesos residentes | Cabe na RAM disponivel (~23 GB)? |
 |---|---|---|
 | bf16 completo (como o template oficial sugere) | 32,4 GB (+3-10 GB de ativacao = **36-44 GB**) | **nao** — estoura ~2x |
-| set quantizado deste repo (GGUF Q4_K_M + TE w4a8) | ~10-12 GB; pico ~13-16 GB @1024² e ~16-21 GB @2048² | **sim** |
+| set quantizado deste repo (GGUF Q4_K_M + TE w4a8) | ~10-12 GB residentes; **pico medido em runtime: 5 GB** | **sim** |
 | com PE-T2I/PE-I2I co-residentes | +18,8 GB | nao (pular esses pesos) |
 
 Ou seja: **o gargalo aqui e compute dos poucos cores ARM, nao RAM** — desde que voce use o set
@@ -80,9 +92,14 @@ proprio servidor em vez de assumir o nome:
 curl -s http://comfy:8188/object_info | jq -r 'keys[] | select(test("gguf"; "i"))'
 ```
 
-A classe retornada (tipicamente `UnetLoaderGGUF`) e o nome que o grafo em
-`app/comfy_workflow.py` precisa referenciar. Se o `object_info` nao listar nenhuma classe
-GGUF, o custom node nao esta instalado e o workflow nao carrega o `.gguf`.
+No dump de `GET /object_info` de 2026-09-21 a classe retornada foi `UnetLoaderGGUF` — e e o
+nome que o grafo em `app/comfy_workflow.py` referencia. Se o `object_info` nao listar nenhuma
+classe GGUF, o custom node nao esta instalado e o workflow nao carrega o `.gguf`.
+
+Antes de baixar 4 GB de GGUF, confira o header do arquivo: ele precisa declarar
+`general.architecture = qwen_image`. Se declarar `qwen_image21`, o fork GGUF **recusa** o
+arquivo (*"Unexpected architecture type"*) — o snippet de verificacao esta em
+[`docs/LOCAL-INFERENCE.md`](docs/LOCAL-INFERENCE.md), secao 5.
 
 ### E a imagem Docker do ComfyUI?
 
@@ -101,7 +118,7 @@ esboco esta comentado dentro do `docker-compose.dokploy.yml`).
 | Provider | O que e | Custo | Latencia 1024² | Precisa de |
 |---|---|---|---|---|
 | `fake` | PNG sintetico com Pillow (gradiente + prompt + seed desenhados). **Nunca** acessa a rede | R$ 0 | ~3 s (simulado) | nada |
-| `local_comfy` | ComfyUI na propria VM, set GGUF Q4_K_M | custo da VM | **30 min a ~4,5 h** | pesos baixados + imagem arm64 + ComfyUI no ar |
+| `local_comfy` | ComfyUI na propria VM, set GGUF Q4_K_M. **Validado e nao recomendado: bloqueio de infraestrutura** (ver [`docs/LOCAL-INFERENCE.md`](docs/LOCAL-INFERENCE.md)) | custo da VM | **~13 min @512²/4 steps · ~39 min @1024²/4 steps · ~3,6 h @1024²/25 steps** (medido: 129,74 s/step a 512²) | pesos (11,2 GB) + imagem arm64 propria + ComfyUI no ar |
 | `fal` | fal.ai, endpoint sincrono `fal.run` (o qwen-image-2.1 esta disponivel na plataforma) | **$0,02/megapixel de saida** = $0,021 @1024², $0,047 @1536², $0,084 @2048²; 4 imagens @1024² ≈ $0,08. Edit: ~$0,0367/MP de entrada + de saida (~$0,0733 p/ 1 MP in + 1 MP out) | segundos | `FAL_KEY` |
 | `remote_gpu` | GPU alugada com vLLM-Omni (`vllm serve Qwen/Qwen-Image-2.1 --omni --port 8091`), rota OpenAI-compat `/v1/images/generations` | $0,5-2/h de GPU 48 GB | segundos a ~1 min | `REMOTE_GPU_URL` (+ `REMOTE_GPU_KEY`) |
 

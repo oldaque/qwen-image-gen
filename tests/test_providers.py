@@ -14,12 +14,15 @@ from __future__ import annotations
 import base64
 import importlib
 import io
+import json
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 from PIL import Image, ImageFont
 
+from app import comfy_workflow
 from app.config import Settings
 from app.providers import get_provider, is_provider_available
 from app.providers.base import (
@@ -440,6 +443,309 @@ async def test_remote_gpu_recusa_reference_images() -> None:
     )
     with pytest.raises(ProviderError):
         await provider.generate(_req(reference_images=["https://exemplo.com/a.png"]), noop_progress)
+
+
+# ---------------------------------------------------------------------------
+# contrato de nodes do ComfyUI (app/comfy_workflow.py x dump de /object_info)
+# ---------------------------------------------------------------------------
+
+#: Subset cru de GET /object_info do ComfyUI real (2026-09-21). E a fonte de
+#: verdade do contrato: nenhum input fora daqui pode ser enviado a um node.
+#: ATENCAO: o dump e evidencia do CONTRATO, nao de um job executado — o teste
+#: pratico ponta a ponta nao rodou (ver docs/LOCAL-INFERENCE.md).
+OBJECT_INFO_PATH = (
+    Path(__file__).resolve().parents[1] / "docs" / "evidence" / "comfyui-object-info-subset.json"
+)
+
+
+@pytest.fixture(scope="module")
+def object_info() -> dict[str, Any]:
+    with OBJECT_INFO_PATH.open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _contrato_do_node(spec: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """(obrigatorios, permitidos) de um node no /object_info."""
+    declarados = spec.get("input") or {}
+    obrigatorios = set(declarados.get("required") or {})
+    permitidos = obrigatorios | set(declarados.get("optional") or {})
+    return obrigatorios, permitidos
+
+
+def _assert_grafo_respeita_o_contrato(workflow: dict[str, Any], object_info: dict[str, Any]) -> None:
+    """Todo node existe no dump, nenhum input sai do que ele declara, e todo link e valido."""
+    assert workflow, "workflow vazio"
+    for node_id, node in workflow.items():
+        spec = object_info[node["class_type"]]  # KeyError = classe inexistente
+        obrigatorios, permitidos = _contrato_do_node(spec)
+        enviados = set(node["inputs"])
+        assert enviados <= permitidos, (
+            f"node {node_id} ({node['class_type']}) envia input desconhecido: "
+            f"{sorted(enviados - permitidos)}"
+        )
+        assert obrigatorios <= enviados, (
+            f"node {node_id} ({node['class_type']}) sem input obrigatorio: "
+            f"{sorted(obrigatorios - enviados)}"
+        )
+        # Um link e [node_id, slot]: o node tem de existir e o slot tem de estar
+        # dentro da aridade de saida que o dump declara para a classe dele.
+        for entrada, valor in node["inputs"].items():
+            if not (isinstance(valor, list) and len(valor) == 2):
+                continue
+            destino, slot = str(valor[0]), valor[1]
+            assert destino in workflow, (
+                f"node {node_id} ({node['class_type']}).{entrada} aponta para node inexistente: {destino}"
+            )
+            saidas = object_info[workflow[destino]["class_type"]].get("output", [])
+            assert isinstance(slot, int) and 0 <= slot < len(saidas), (
+                f"node {node_id} ({node['class_type']}).{entrada}: slot {slot} fora da aridade "
+                f"de {destino} ({workflow[destino]['class_type']} tem {len(saidas)} saida(s))"
+            )
+
+
+def test_grafo_default_usa_so_inputs_do_contrato_verificado(object_info: dict[str, Any]) -> None:
+    workflow = comfy_workflow.build_workflow("uma maca vermelha", width=512, height=512)
+    _assert_grafo_respeita_o_contrato(workflow, object_info)
+
+
+def test_grafo_com_resolution_selector_respeita_o_contrato(object_info: dict[str, Any]) -> None:
+    workflow = comfy_workflow.build_workflow(
+        "uma maca vermelha", width=1536, height=640, use_resolution_selector=True
+    )
+    _assert_grafo_respeita_o_contrato(workflow, object_info)
+
+
+def test_grafo_default_reproduz_os_valores_do_contrato() -> None:
+    """Valores exatos que o grafo default emite.
+
+    Os nomes de classe/input vem do dump de /object_info; os valores (arquivos, device,
+    dtype, steps, cfg, seed) sao os do grafo que foi aceito por um ComfyUI real em
+    2026-09-21 com node_errors {} — ver docs/LOCAL-INFERENCE.md.
+    """
+    workflow = comfy_workflow.build_workflow(
+        "a simple red apple on a wooden table, soft light",
+        steps=4,
+        seed=12345,
+        filename_prefix="qwen21_test",
+        width=512,
+        height=512,
+    )
+
+    assert workflow[comfy_workflow.NODE_ID_UNET]["class_type"] == "UnetLoaderGGUF"
+    assert workflow[comfy_workflow.NODE_ID_UNET]["inputs"] == {
+        "unet_name": comfy_workflow.DIFFUSION_MODEL_GGUF
+    }
+
+    assert workflow[comfy_workflow.NODE_ID_CLIP]["inputs"] == {
+        "clip_name": comfy_workflow.TEXT_ENCODER,
+        "type": "qwen_image",
+        "device": "default",
+    }
+    assert workflow[comfy_workflow.NODE_ID_VAE]["inputs"] == {"vae_name": comfy_workflow.VAE_MODEL}
+    assert workflow[comfy_workflow.NODE_ID_LATENT]["class_type"] == "EmptyLatentImage"
+    assert workflow[comfy_workflow.NODE_ID_LATENT]["inputs"] == {
+        "width": 512,
+        "height": 512,
+        "batch_size": 1,
+    }
+
+    cache = workflow[comfy_workflow.NODE_ID_CACHE]["inputs"]
+    assert cache == {"model": [comfy_workflow.NODE_ID_UNET, 0], "device": "cpu", "dtype": "int8"}
+
+    sampler = workflow[comfy_workflow.DEFAULT_SAMPLER_NODE_ID]["inputs"]
+    assert sampler["model"] == [comfy_workflow.NODE_ID_CACHE, 0]
+    assert sampler["positive"] == [comfy_workflow.NODE_ID_POSITIVE, 0]
+    assert sampler["negative"] == [comfy_workflow.NODE_ID_POSITIVE, 1]
+    assert sampler["latent_image"] == [comfy_workflow.NODE_ID_LATENT, 0]
+    assert (sampler["seed"], sampler["steps"], sampler["cfg"]) == (12345, 4, 1.0)
+    assert (sampler["sampler_name"], sampler["scheduler"], sampler["denoise"]) == (
+        "euler",
+        "simple",
+        1.0,
+    )
+
+    assert workflow[comfy_workflow.NODE_ID_DECODE]["inputs"] == {
+        "samples": [comfy_workflow.NODE_ID_SAMPLER, 0],
+        "vae": [comfy_workflow.NODE_ID_VAE, 0],
+    }
+    assert workflow[comfy_workflow.NODE_ID_SAVE]["inputs"] == {
+        "images": [comfy_workflow.NODE_ID_DECODE, 0],
+        "filename_prefix": "qwen21_test",
+    }
+
+
+def test_text_encode_leva_os_cinco_inputs_obrigatorios() -> None:
+    workflow = comfy_workflow.build_workflow("uma maca", negative="borrado")
+    encode = workflow[comfy_workflow.NODE_ID_POSITIVE]
+
+    assert encode["class_type"] == "TextEncodeQwenImage21"
+    # So {clip, prompt} faz o ComfyUI recusar o grafo (faltam 3 inputs obrigatorios).
+    assert set(encode["inputs"]) == {
+        "clip",
+        "prompt",
+        "negative_prompt",
+        "resolution",
+        "images",
+    }
+    assert encode["inputs"]["prompt"] == "uma maca"
+    assert encode["inputs"]["negative_prompt"] == "borrado"
+    assert encode["inputs"]["clip"] == [comfy_workflow.NODE_ID_CLIP, 0]
+    assert encode["inputs"]["resolution"] == comfy_workflow.DEFAULT_ENCODE_RESOLUTION
+    assert encode["inputs"]["images"] == {}  # COMFY_AUTOGROW_V3 vazio = t2i puro
+
+
+def test_um_unico_encode_alimenta_positive_e_negative() -> None:
+    workflow = comfy_workflow.build_workflow("uma maca", negative="borrado")
+
+    encodes = [n for n in workflow.values() if n["class_type"] == "TextEncodeQwenImage21"]
+    assert len(encodes) == 1  # o grafo validado usa UM node de encode
+    assert comfy_workflow.NODE_ID_NEGATIVE not in workflow
+
+    sampler = workflow[comfy_workflow.DEFAULT_SAMPLER_NODE_ID]["inputs"]
+    assert sampler["positive"] == [comfy_workflow.NODE_ID_POSITIVE, 0]
+    assert sampler["negative"] == [comfy_workflow.NODE_ID_POSITIVE, 1]  # saida 1 do mesmo node
+
+
+def test_cache_off_liga_o_modelo_direto_no_sampler() -> None:
+    workflow = comfy_workflow.build_workflow("uma maca", use_cache_node=False)
+    assert comfy_workflow.NODE_ID_CACHE not in workflow
+    sampler = workflow[comfy_workflow.DEFAULT_SAMPLER_NODE_ID]["inputs"]
+    assert sampler["model"] == [comfy_workflow.NODE_ID_UNET, 0]
+
+
+def test_contagem_de_nodes_do_grafo_default_e_nove() -> None:
+    """9 ids ativos (1,2,3,4,5,7,8,9,10) para as 9 classes do contrato.
+
+    8 nodes NAO existe com as 9 classes do contrato: a unica configuracao que da
+    8 e `use_cache_node=False` (o id 7, QwenImage21Cache, sai). O id '6' e
+    reservado e nunca entra na conta.
+    """
+    default = comfy_workflow.build_workflow("uma maca")
+    assert comfy_workflow.node_count(default) == 9
+    assert set(default) == {"1", "2", "3", "4", "5", "7", "8", "9", "10"}
+    assert comfy_workflow.NODE_ID_NEGATIVE not in default
+    assert len({n["class_type"] for n in default.values()}) == 9  # 1 classe por node
+
+    sem_cache = comfy_workflow.build_workflow("uma maca", use_cache_node=False)
+    assert comfy_workflow.node_count(sem_cache) == 8
+    assert set(sem_cache) == {"1", "2", "3", "4", "5", "8", "9", "10"}
+
+    com_selector = comfy_workflow.build_workflow("uma maca", use_resolution_selector=True)
+    assert comfy_workflow.node_count(com_selector) == 10
+
+
+@pytest.mark.parametrize(("width", "height", "esperado"), [
+    (1024, 1024, "1:1 (Square)"),
+    (1920, 1080, "16:9 (Widescreen)"),
+    (1080, 1920, "9:16 (Portrait Widescreen)"),
+])
+def test_resolution_selector_nao_manda_width_height(
+    width: int, height: int, esperado: str
+) -> None:
+    """O node so aceita aspect_ratio/megapixels/multiple; W/H vem do EmptyLatentImage."""
+    workflow = comfy_workflow.build_workflow(
+        "uma maca", width=width, height=height, use_resolution_selector=True
+    )
+    selector = workflow[comfy_workflow.NODE_ID_RESOLUTION]["inputs"]
+
+    assert selector["aspect_ratio"] == esperado
+    assert set(selector) == {"aspect_ratio", "megapixels", "multiple"}
+    assert selector["multiple"] == comfy_workflow.DEFAULT_RESOLUTION_MULTIPLE
+
+    latent = workflow[comfy_workflow.NODE_ID_LATENT]["inputs"]
+    assert latent["width"] == [comfy_workflow.NODE_ID_RESOLUTION, 0]
+    assert latent["height"] == [comfy_workflow.NODE_ID_RESOLUTION, 1]
+    assert latent["batch_size"] == 1
+
+
+def test_resolution_selector_desligado_nao_monta_o_node() -> None:
+    workflow = comfy_workflow.build_workflow("uma maca", width=512, height=512)
+    assert comfy_workflow.NODE_ID_RESOLUTION not in workflow
+    assert workflow[comfy_workflow.NODE_ID_LATENT]["class_type"] == "EmptyLatentImage"
+
+
+def test_save_image_e_a_saida_default() -> None:
+    workflow = comfy_workflow.build_workflow("uma maca")
+    assert workflow[comfy_workflow.NODE_ID_SAVE]["class_type"] == "SaveImage"
+    assert comfy_workflow.DEFAULT_OUTPUT_NODE_IDS == (comfy_workflow.NODE_ID_SAVE,)
+    assert comfy_workflow.output_node_ids(workflow) == (comfy_workflow.NODE_ID_SAVE,)
+    assert comfy_workflow.DEFAULT_SAMPLER_NODE_ID == "8"
+
+
+def test_save_image_advanced_so_entra_via_kwarg() -> None:
+    workflow = comfy_workflow.build_workflow("uma maca", save_node=comfy_workflow.NODE_SAVE_ADVANCED)
+    assert workflow[comfy_workflow.NODE_ID_SAVE]["class_type"] == "SaveImageAdvanced"
+    assert comfy_workflow.output_node_ids(workflow) == (comfy_workflow.NODE_ID_SAVE,)
+
+
+def test_loader_gguf_e_o_default_e_o_int8_usa_o_loader_core() -> None:
+    gguf = comfy_workflow.build_workflow("uma maca")
+    assert gguf[comfy_workflow.NODE_ID_UNET]["class_type"] == comfy_workflow.NODE_UNET_GGUF
+
+    safetensors = comfy_workflow.build_workflow(
+        "uma maca", unet_name=comfy_workflow.DIFFUSION_MODEL_INT8
+    )
+    assert safetensors[comfy_workflow.NODE_ID_UNET]["class_type"] == comfy_workflow.NODE_UNET_STD
+
+    forcado = comfy_workflow.build_workflow("uma maca", unet_loader="UnetLoaderGGUF")
+    assert forcado[comfy_workflow.NODE_ID_UNET]["class_type"] == "UnetLoaderGGUF"
+
+
+def test_build_workflow_aceita_a_assinatura_publica_completa() -> None:
+    """O provider local_comfy chama por kwargs: nada aqui pode virar obrigatorio."""
+    workflow = comfy_workflow.build_workflow(
+        "prompt",
+        "negative",
+        512,
+        512,
+        4,
+        1.0,
+        7,
+        "pref",
+        2,
+        unet_name=comfy_workflow.DIFFUSION_MODEL_GGUF,
+        clip_name=comfy_workflow.TEXT_ENCODER,
+        vae_name=comfy_workflow.VAE_MODEL,
+        unet_loader=None,
+        use_cache_node=True,
+        use_resolution_selector=False,
+        sampler_name="euler",
+        scheduler="simple",
+        denoise=1.0,
+        clip_type=comfy_workflow.CLIP_TYPE,
+        cache_device="cpu",
+        cache_dtype="int4",
+        resolution=1024,
+        save_node=comfy_workflow.NODE_SAVE,
+    )
+    assert workflow[comfy_workflow.NODE_ID_CACHE]["inputs"]["dtype"] == "int4"
+    assert workflow[comfy_workflow.NODE_ID_POSITIVE]["inputs"]["resolution"] == 1024
+    assert workflow[comfy_workflow.NODE_ID_LATENT]["inputs"]["batch_size"] == 2
+    assert comfy_workflow.total_steps(workflow) == 4
+    assert comfy_workflow.node_count(workflow) == 9
+
+
+def test_verify_notes_e_cabecalho_registram_o_teste_pratico() -> None:
+    """O registro diz o que veio do dump E o que o teste pratico mediu de verdade."""
+    notas = "\n".join(comfy_workflow.VERIFY_NOTES)
+    assert "2026-09-21" in notas
+    assert "docs/LOCAL-INFERENCE.md" in notas
+    assert "infraestrutura" in notas.lower()
+
+    cabecalho = comfy_workflow.__doc__ or ""
+    assert "docs/LOCAL-INFERENCE.md" in cabecalho
+    assert "infraestrutura" in cabecalho.lower()
+
+    # O teste ponta a ponta FOI executado: o grafo foi aceito por um servidor real
+    # (node_errors {}) e o tempo por step foi medido. Esses numeros sao registro, nao
+    # estimativa — o modulo precisa carregar-los para nao virar "nunca testado".
+    for medido, fonte in (
+        ("129,74", "s/step a 512² medido"),
+        ("node_errors", "grafo aceito pelo servidor"),
+        ("5 GB", "pico de RAM"),
+    ):
+        assert medido in cabecalho, f"cabecalho nao registra {fonte}"
+        assert medido in notas, f"VERIFY_NOTES nao registra {fonte}"
 
 
 # ---------------------------------------------------------------------------
