@@ -1,0 +1,35 @@
+# Controle de versao / CI
+.git
+.gitignore
+.github/
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Dados de runtime (montados como volume em /data)
+data/
+
+# Segredos
+.env
+.env.*
+
+# Ruido de SO / editores
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Imagens de teste e temporarios
+tests/
+*.log

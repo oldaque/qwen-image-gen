@@ -1,0 +1,110 @@
+# =============================================================================
+# docker-compose.dokploy.yml — stack image-gen para Dokploy v0.30.7
+# Alvo: VM ARM64 sem GPU (Ubuntu 24.04, com o Traefik do proprio Dokploy)
+#
+# No Dokploy: Project -> Create Service -> Compose -> apontar para este arquivo.
+# Sem labels de Traefik de proposito: o Dokploy injeta as labels dele quando um
+# dominio for atribuido ao servico "web".
+#
+# Preparacao obrigatoria no servidor:
+#   cp .env.example .env && ${EDITOR:-vi} .env   # "env_file: .env" e obrigatorio
+#   docker network create dokploy-network        # se ainda nao existir no host
+#
+# Subir so o webapp (provider fake/fal/remote_gpu):
+#   docker compose -f docker-compose.dokploy.yml up -d --build
+# Subir tambem o ComfyUI local (requer a imagem arm64 que voce builda):
+#   docker compose -f docker-compose.dokploy.yml --profile local up -d --build
+#   # e no .env: IMAGE_PROVIDER=local_comfy e COMFY_IMAGE=<sua imagem>
+# =============================================================================
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-0.1.0}
+    image: image-gen-web:${APP_VERSION:-0.1.0}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8080:8000"
+    env_file:
+      - .env
+    environment:
+      # Overrides explicitos: garantem os caminhos do volume e o DNS interno do
+      # serviço comfy mesmo que o .env esqueça alguma coisa.
+      COMFY_URL: ${COMFY_URL:-http://comfy:8188}
+      DATA_DIR: ${DATA_DIR:-/data}
+      DB_PATH: ${DB_PATH:-/data/jobs.db}
+      IMAGES_DIR: ${IMAGES_DIR:-/data/images}
+    volumes:
+      - appdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - default
+      - dokploy-network
+
+  # ---------------------------------------------------------------------------
+  # ComfyUI local (CPU, arm64). Perfil "local": NAO sobe por padrao.
+  #
+  # *** A IMAGEM ABAIXO E UM PLACEHOLDER DELIBERADO ***
+  # Nao existe imagem arm64 utilizavel do ComfyUI: o projeto nao publica imagem
+  # oficial e as imagens da comunidade sao amd64 (a unica arm64, dustynv/comfyui,
+  # e do jetson-containers e depende de iGPU Tegra). O caminho real e buildar a
+  # sua imagem arm64 — ~15 linhas de Dockerfile. Esboco (buildar, taggear e
+  # apontar COMFY_IMAGE para a tag):
+  #
+  #   FROM python:3.12-slim
+  #   RUN apt-get update && apt-get install -y --no-install-recommends \
+  #         git libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+  #   RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+  #   RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI /ComfyUI
+  #   RUN pip install --no-cache-dir -r /ComfyUI/requirements.txt
+  #   # GGUF (rota obrigatoria neste tipo de hardware): o template oficial usa
+  #   # qwen_image_2.1_int8_convrot, que no CPU arm64 cai no kernel torch._int_mm
+  #   # (~4.2 GFLOPS medidos nesta classe de hardware = o PIOR caso). Use o fork
+  #   # do leejet (mais mantido que o city96):
+  #   RUN git clone --depth 1 https://github.com/leejet/ComfyUI-GGUF \
+  #         /ComfyUI/custom_nodes/ComfyUI-GGUF
+  #   RUN pip install --no-cache-dir -r /ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt
+  #   # O volume "models" e montado em /models; o ComfyUI le /ComfyUI/models:
+  #   RUN rm -rf /ComfyUI/models && ln -s /models /ComfyUI/models
+  #   VOLUME /models /output
+  #   EXPOSE 8188
+  #   CMD ["python","/ComfyUI/main.py","--cpu","--listen","0.0.0.0","--port","8188",
+  #        "--output-directory","/output"]
+  #
+  # Flags uteis do main.py para uma VM ARM64 sem GPU: --cpu (essencial), --cache-none,
+  # --disable-smart-memory, --cpu-vae. --lowvram e quase no-op com dynamic vram.
+  # Sem auth embutida -> por isso NAO publicamos porta nenhuma aqui (o servico
+  # "web" alcanca pelo DNS do compose em http://comfy:8188). Para debug local,
+  # descomente a publicacao em 127.0.0.1 apenas.
+  # ---------------------------------------------------------------------------
+  comfy:
+    profiles: ["local"]
+    image: ${COMFY_IMAGE:-comfyui-arm64:local-placeholder}
+    restart: unless-stopped
+    init: true
+    # ports:
+    #   - "127.0.0.1:8188:8188"   # debug: nunca expor publicamente, sem auth
+    volumes:
+      - models:/models
+      - comfyout:/output
+
+volumes:
+  appdata:
+  models:
+  comfyout:
+
+networks:
+  # Criada pelo proprio Dokploy na instalacao. O servico "web" entra nela para
+  # que o Traefik alcance o container quando um dominio for atribuido.
+  dokploy-network:
+    external: true
+    name: dokploy-network

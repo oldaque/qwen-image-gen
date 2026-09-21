@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Gerador de imagens (Qwen Image 2.1) — fila assíncrona, SSE e galeria.">
+  <title>Gerador de Imagens</title>
+
+  <!-- Tailwind via CDN: sem build step, sem framework. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: {
+              950: '#07090d',
+              900: '#0b0e14',
+              850: '#10141c',
+              800: '#151a24',
+              700: '#1e2533',
+              600: '#2a3346',
+            },
+            brand: {
+              300: '#a5e8fd',
+              400: '#7dd3fc',
+              500: '#38bdf8',
+              600: '#0ea5e9',
+            },
+          },
+          fontFamily: {
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- Complemento ao Tailwind: scrollbar, barra de progresso, grid da galeria, lightbox. -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body class="min-h-screen bg-ink-950 text-zinc-200 antialiased">
+  <noscript>
+    <p class="m-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-200">
+      Este aplicativo precisa de JavaScript habilitado para funcionar.
+    </p>
+  </noscript>
+
+  <!-- ================= HEADER ================= -->
+  <header class="sticky top-0 z-30 border-b border-ink-700/80 bg-ink-950/85 backdrop-blur">
+    <div class="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3">
+      <div class="flex items-center gap-3">
+        <span class="grid h-9 w-9 place-items-center rounded-lg bg-gradient-to-br from-brand-500 to-indigo-500 shadow-lg shadow-brand-500/20" aria-hidden="true">
+          <svg viewBox="0 0 24 24" class="h-5 w-5 text-ink-950" fill="currentColor">
+            <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v9A2.5 2.5 0 0 1 17.5 17H10l-4.2 3.36A.75.75 0 0 1 4.6 19.8V17.2A2.5 2.5 0 0 1 3 14.9Z"/>
+          </svg>
+        </span>
+        <div class="leading-tight">
+          <h1 class="text-base font-semibold tracking-tight text-zinc-100">Gerador de Imagens</h1>
+          <p class="text-[11px] text-zinc-500">fila assíncrona · progresso ao vivo · galeria</p>
+        </div>
+      </div>
+
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        <span id="healthDot" class="status-dot bg-zinc-500" title="estado do servidor"></span>
+        <span id="healthLabel" class="text-[11px] text-zinc-500">conectando…</span>
+
+        <span class="badge border-ink-600 bg-ink-800 text-zinc-300" title="provider ativo">
+          provider:
+          <strong id="providerBadge" class="font-mono font-semibold text-brand-300">…</strong>
+        </span>
+
+        <span class="badge border-ink-600 bg-ink-800 text-zinc-400" title="model_id do provider">
+          modelo: <strong id="modelBadge" class="font-mono font-normal text-zinc-300">…</strong>
+        </span>
+
+        <span class="badge border-ink-600 bg-ink-800 text-zinc-400" title="jobs aguardando/executando no servidor">
+          fila: <strong id="queueBadge" class="font-mono font-normal text-zinc-300">—</strong>
+        </span>
+
+        <span id="versionBadge" class="badge border-ink-700 bg-ink-900 text-zinc-500" title="APP_VERSION">v—</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ================= CORPO ================= -->
+  <main class="mx-auto grid max-w-[1600px] grid-cols-1 gap-4 px-4 py-4 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)] xl:grid-cols-[minmax(300px,360px)_minmax(0,1fr)_minmax(260px,320px)]">
+
+    <!-- ---------- COLUNA ESQUERDA: FORMULÁRIO ---------- -->
+    <aside class="lg:sticky lg:top-[68px] lg:max-h-[calc(100vh-84px)] lg:self-start">
+      <form id="jobForm" novalidate class="scroll-area card max-h-[calc(100vh-84px)] overflow-y-auto p-4">
+
+        <div class="mb-3 flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-zinc-200">Nova geração</h2>
+          <button type="reset" id="resetBtn" class="text-[11px] text-zinc-500 underline-offset-2 hover:text-zinc-300 hover:underline">limpar</button>
+        </div>
+
+        <!-- prompt -->
+        <label class="label" for="prompt">Prompt <span class="text-rose-400">*</span></label>
+        <textarea id="prompt" name="prompt" rows="6" required minlength="1" maxlength="4000"
+          placeholder="Descreva a imagem. Ex.: retrato cinematográfico de um farol na costa, luz dourada do fim da tarde, névoa baixa, detalhes nítidos"
+          class="input scroll-area resize-y"></textarea>
+        <p class="mt-1 flex items-center justify-between text-[11px]">
+          <span class="field-error" data-error-for="prompt"></span>
+          <span id="promptCount" class="text-zinc-600">0 / 4000</span>
+        </p>
+
+        <!-- negative prompt (colapsável) -->
+        <div class="mt-2">
+          <button type="button" id="negativeToggle" aria-expanded="false" aria-controls="negativeWrap"
+            class="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left text-[12px] text-zinc-400 hover:text-zinc-200">
+            <svg viewBox="0 0 20 20" class="chev h-3.5 w-3.5 transition-transform" fill="currentColor" aria-hidden="true">
+              <path d="M7.2 4.6a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 1 1-1.4-1.4L11.5 10 7.2 6a1 1 0 0 1 0-1.4Z"/>
+            </svg>
+            <span>Prompt negativo</span>
+            <span class="ml-auto text-[10px] uppercase tracking-wider text-zinc-600">opcional</span>
+          </button>
+          <div id="negativeWrap" hidden class="collapsible">
+            <textarea id="negativePrompt" name="negative_prompt" rows="3"
+              placeholder="O que evitar. Ex.: texto, marca d'água, membros extras, desfoque, baixa resolução"
+              class="input scroll-area mt-2 resize-y"></textarea>
+            <p class="field-error" data-error-for="negative_prompt"></p>
+          </div>
+        </div>
+
+        <!-- dimensões -->
+        <div class="mt-4">
+          <div class="mb-2 flex items-baseline justify-between">
+            <span class="label mb-0">Tamanho</span>
+            <span id="mpHint" class="text-[11px] text-zinc-600">—</span>
+          </div>
+
+          <div class="flex flex-wrap gap-1.5" id="presetRow" role="group" aria-label="presets de tamanho">
+            <button type="button" class="preset" data-preset="512">512²</button>
+            <button type="button" class="preset" data-preset="768">768²</button>
+            <button type="button" class="preset" data-preset="1024">1024²</button>
+            <button type="button" class="preset" data-preset="1536">1536²</button>
+            <button type="button" class="preset" data-preset="2048">2048²</button>
+          </div>
+
+          <div class="mt-2 grid grid-cols-2 gap-2">
+            <div>
+              <label class="label label-sm" for="width">Largura (px)</label>
+              <input type="number" id="width" name="width" value="1024" step="8" inputmode="numeric" class="input">
+              <p class="field-error" data-error-for="width"></p>
+            </div>
+            <div>
+              <label class="label label-sm" for="height">Altura (px)</label>
+              <input type="number" id="height" name="height" value="1024" step="8" inputmode="numeric" class="input">
+              <p class="field-error" data-error-for="height"></p>
+            </div>
+          </div>
+          <p id="sizeRangeHint" class="mt-1 text-[11px] text-zinc-600"></p>
+        </div>
+
+        <!-- quantidade / seed / formato -->
+        <div class="mt-4 grid grid-cols-2 gap-2">
+          <div>
+            <label class="label label-sm" for="numImages">Quantidade</label>
+            <select id="numImages" name="num_images" class="input">
+              <option value="1" selected>1 imagem</option>
+              <option value="2">2 imagens</option>
+              <option value="3">3 imagens</option>
+              <option value="4">4 imagens</option>
+            </select>
+          </div>
+          <div>
+            <label class="label label-sm" for="outputFormat">Formato</label>
+            <select id="outputFormat" name="output_format" class="input">
+              <option value="png" selected>PNG</option>
+              <option value="jpeg">JPEG</option>
+              <option value="webp">WebP</option>
+            </select>
+          </div>
+          <div class="col-span-2">
+            <label class="label label-sm" for="seed">Seed <span class="font-normal text-zinc-600">(vazio = aleatória)</span></label>
+            <input type="number" id="seed" name="seed" min="0" step="1" inputmode="numeric" placeholder="aleatória" class="input">
+            <p class="field-error" data-error-for="seed"></p>
+          </div>
+        </div>
+
+        <!-- opções avançadas -->
+        <div class="mt-3">
+          <button type="button" id="advancedToggle" aria-expanded="false" aria-controls="advancedWrap"
+            class="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left text-[12px] text-zinc-400 hover:text-zinc-200">
+            <svg viewBox="0 0 20 20" class="chev h-3.5 w-3.5 transition-transform" fill="currentColor" aria-hidden="true">
+              <path d="M7.2 4.6a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 1 1-1.4-1.4L11.5 10 7.2 6a1 1 0 0 1 0-1.4Z"/>
+            </svg>
+            <span>Opções avançadas</span>
+          </button>
+          <div id="advancedWrap" hidden class="collapsible space-y-3 pt-2">
+            <div>
+              <label class="label label-sm" for="promptExpander">Expandir prompt</label>
+              <select id="promptExpander" name="prompt_expander" class="input">
+                <option value="quality" selected>quality (o modelo reescreve o prompt)</option>
+                <option value="none">none (usar o prompt literalmente)</option>
+              </select>
+            </div>
+            <div>
+              <label class="label label-sm" for="referenceImages">Imagens de referência</label>
+              <textarea id="referenceImages" name="reference_images" rows="2"
+                placeholder="Uma URL http(s) ou data URI base64 por linha"
+                class="input scroll-area resize-y font-mono text-[11px]"></textarea>
+              <p class="mt-1 text-[11px] text-zinc-600">Com referências, o provider usa o modo de edição (custo maior).</p>
+              <p class="field-error" data-error-for="reference_images"></p>
+            </div>
+          </div>
+        </div>
+
+        <!-- erro de submit -->
+        <p id="formError" hidden class="mt-3 rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-200"></p>
+
+        <button type="submit" id="generateBtn" class="btn-primary mt-4 w-full">
+          <span id="generateSpinner" class="spinner hidden" aria-hidden="true"></span>
+          <span id="generateLabel">Gerar</span>
+        </button>
+        <p class="mt-2 text-center text-[11px] text-zinc-600">O job roda no servidor; você pode fechar e voltar depois.</p>
+      </form>
+    </aside>
+
+    <!-- ---------- CENTRO: JOB ATUAL + GALERIA ---------- -->
+    <section class="min-w-0 space-y-4">
+
+      <!-- aviso de provider lento -->
+      <div id="providerWarning" hidden class="rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-[12px] leading-relaxed text-amber-100">
+        <strong class="font-semibold">Provider local_comfy (ComfyUI em CPU):</strong>
+        a geração leva dezenas de minutos por imagem. Em 512² conte com ~35-60 min por imagem; em 1024² pode passar de 2 h;
+        em 2048² é inviável na prática. Deixe esta aba aberta — o progresso é acompanhado de forma assíncrona.
+      </div>
+
+      <div id="configError" hidden class="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-[12px] text-rose-200"></div>
+
+      <!-- card do job atual -->
+      <article id="jobCard" class="card p-4">
+        <div id="jobEmpty" class="py-8 text-center text-sm text-zinc-500">
+          Nenhum job em foco. Preencha o prompt e clique em <span class="text-zinc-300">Gerar</span>.
+        </div>
+        <div id="jobBody" hidden></div>
+      </article>
+
+      <!-- galeria -->
+      <section class="card p-4">
+        <div class="mb-3 flex flex-wrap items-center gap-2">
+          <h2 class="text-sm font-semibold text-zinc-200">Galeria</h2>
+          <span id="galleryCount" class="badge border-ink-600 bg-ink-800 text-zinc-400">0 imagens</span>
+          <div class="ml-auto flex items-center gap-2">
+            <label class="flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
+              <input type="checkbox" id="onlyCurrentToggle" class="h-3.5 w-3.5 accent-brand-500">
+              só o job atual
+            </label>
+            <button type="button" id="refreshBtn" class="btn-ghost">atualizar</button>
+          </div>
+        </div>
+        <div id="gallery" class="gallery-grid"></div>
+        <p id="galleryEmpty" class="py-10 text-center text-sm text-zinc-600">
+          As imagens geradas aparecem aqui, das mais novas para as mais antigas.
+        </p>
+      </section>
+    </section>
+
+    <!-- ---------- DIREITA: HISTÓRICO ---------- -->
+    <aside class="xl:sticky xl:top-[68px] xl:max-h-[calc(100vh-84px)] xl:self-start">
+      <section class="card flex max-h-[calc(100vh-84px)] flex-col overflow-hidden">
+        <div class="flex items-center gap-2 border-b border-ink-700/70 px-4 py-3">
+          <h2 class="text-sm font-semibold text-zinc-200">Histórico</h2>
+          <span id="historyCount" class="badge border-ink-600 bg-ink-800 text-zinc-400">0</span>
+          <button type="button" id="historyRefreshBtn" class="btn-ghost ml-auto">atualizar</button>
+        </div>
+        <div id="historyList" class="scroll-area flex-1 divide-y divide-ink-800 overflow-y-auto"></div>
+        <p id="historyEmpty" class="px-4 py-8 text-center text-[12px] text-zinc-600">Nenhum job ainda.</p>
+      </section>
+    </aside>
+  </main>
+
+  <!-- ================= LIGHTBOX ================= -->
+  <div id="lightbox" hidden class="lightbox" role="dialog" aria-modal="true" aria-label="Imagem ampliada">
+    <button type="button" id="lightboxBackdrop" class="absolute inset-0 z-0 cursor-zoom-out" aria-label="fechar"></button>
+    <div class="lightbox-panel z-10">
+      <div class="flex flex-wrap items-center gap-2 pb-3">
+        <span id="lightboxMeta" class="font-mono text-[11px] text-zinc-400"></span>
+        <div class="ml-auto flex items-center gap-2">
+          <a id="lightboxDownload" class="btn-ghost" download>baixar</a>
+          <button type="button" id="lightboxDelete" class="btn-danger">apagar</button>
+          <button type="button" id="lightboxClose" class="btn-ghost" aria-label="fechar (Esc)">fechar</button>
+        </div>
+      </div>
+      <div class="relative flex min-h-0 flex-1 items-center justify-center">
+        <button type="button" id="lightboxPrev" class="lightbox-nav left-1" aria-label="imagem anterior">‹</button>
+        <img id="lightboxImg" class="max-h-full max-w-full rounded-lg object-contain shadow-2xl" alt="">
+        <button type="button" id="lightboxNext" class="lightbox-nav right-1" aria-label="próxima imagem">›</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= TOASTS ================= -->
+  <div id="toasts" class="pointer-events-none fixed bottom-4 right-4 z-50 flex w-[min(92vw,380px)] flex-col gap-2"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
