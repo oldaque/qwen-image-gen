@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Qwen-Image-2.1 em CPU: resultado do teste</title>
+<style>
+  :root {
+    --ink: #000;
+    --paper: #fff;
+    --line: #e6e6e6;
+    --muted: #737373;
+    --mono: ui-monospace, "SF Mono", "Geist Mono", "JetBrains Mono", Menlo, monospace;
+    --sans: "Geist", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--sans); line-height: 1.45;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 72px 56px 88px; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 28px;
+  }
+  .eyebrow b { color: var(--ink); font-weight: 600; }
+
+  h1 { font-size: 30px; line-height: 1.2; letter-spacing: -.02em; margin: 0 0 14px; font-weight: 600; }
+  .lede { font-size: 17px; color: #333; max-width: 720px; margin: 0; }
+
+  /* HERO — número gigante */
+  .hero { border-top: 1px solid var(--ink); margin-top: 48px; padding-top: 28px; }
+  .hero-grid { display: flex; align-items: flex-end; gap: 40px; flex-wrap: wrap; }
+  .bignum {
+    font-family: var(--mono); font-size: 132px; line-height: .86; letter-spacing: -.055em;
+    font-weight: 600; margin: 0;
+  }
+  .bignum .unit { font-size: 34px; letter-spacing: -.02em; font-weight: 500; color: var(--muted); margin-left: 10px; }
+  .hero-note { max-width: 380px; }
+  .hero-note .k { font-family: var(--mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .hero-note p { margin: 6px 0 0; font-size: 15px; color: #333; }
+
+  h2 {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; margin: 64px 0 20px;
+    padding-bottom: 10px; border-bottom: 1px solid var(--line);
+  }
+
+  /* CONFIG */
+  .cfg { display: grid; grid-template-columns: 190px 1fr; gap: 0; }
+  .cfg dt, .cfg dd { margin: 0; padding: 13px 0; border-bottom: 1px solid var(--line); font-size: 15px; }
+  .cfg dt { color: var(--muted); }
+  .cfg dd { font-family: var(--mono); font-size: 14px; }
+  .cfg dd em { font-style: normal; color: var(--muted); }
+  .cfg .flag-no { color: var(--ink); font-weight: 600; }
+  .cfg .flag-no::before { content: "✕ "; }
+  .cfg .flag-yes::before { content: "✓ "; }
+
+  /* STAT TILES */
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  .tile { background: var(--paper); padding: 26px 24px 22px; }
+  .tile .v { font-family: var(--mono); font-size: 42px; letter-spacing: -.035em; font-weight: 600; line-height: 1; }
+  .tile .v .s { font-size: 16px; color: var(--muted); letter-spacing: 0; margin-left: 4px; }
+  .tile .l { font-size: 13px; color: var(--muted); margin-top: 10px; }
+
+  /* CHART */
+  .chart { margin-top: 8px; }
+  .row { display: grid; grid-template-columns: 168px 1fr 118px; align-items: center; gap: 18px; padding: 11px 0; }
+  .row .name { font-family: var(--mono); font-size: 13px; }
+  .row .name .tag { display: block; font-size: 11px; color: var(--muted); letter-spacing: .04em; }
+  .bar-wrap { position: relative; height: 34px; }
+  .bar { height: 100%; display: flex; align-items: center; }
+  .bar.measured { background: var(--ink); }
+  .bar.sim {
+    background: repeating-linear-gradient(45deg, #d4d4d4 0 6px, #fff 6px 12px);
+    outline: 1px solid #bdbdbd; outline-offset: -1px;
+  }
+  .row .val { font-family: var(--mono); font-size: 15px; text-align: right; white-space: nowrap; }
+  .row .val em { font-style: normal; color: var(--muted); }
+  .axis { display: grid; grid-template-columns: 168px 1fr 118px; gap: 18px; margin-top: 6px; }
+  .axis .ticks { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
+  .legend { display: flex; gap: 26px; margin-top: 20px; font-size: 13px; color: #333; }
+  .legend span { display: flex; align-items: center; gap: 9px; }
+  .sw { width: 22px; height: 12px; display: inline-block; }
+  .sw.m { background: var(--ink); }
+  .sw.s { background: repeating-linear-gradient(45deg, #d4d4d4 0 5px, #fff 5px 10px); outline: 1px solid #bdbdbd; outline-offset: -1px; }
+
+  /* CONTRASTE */
+  .vs { display: flex; align-items: baseline; gap: 34px; flex-wrap: wrap; margin-top: 4px; }
+  .vs .item .n { font-family: var(--mono); font-size: 34px; font-weight: 600; letter-spacing: -.03em; }
+  .vs .item .t { font-size: 13px; color: var(--muted); }
+  .vs .arrow { font-family: var(--mono); font-size: 22px; color: var(--muted); }
+
+  footer { margin-top: 72px; padding-top: 20px; border-top: 1px solid var(--ink); font-size: 13px; color: var(--muted); }
+  footer b { color: var(--ink); font-weight: 600; }
+  footer p { margin: 0 0 8px; }
+  .stamp { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: #a3a3a3; margin-top: 22px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow"><b>Qwen-Image-2.1</b> &nbsp;·&nbsp; inferência local &nbsp;·&nbsp; 2026-09-21</p>
+
+  <h1>7 bilhões de parâmetros, rodando numa VM ARM sem GPU.</h1>
+  <p class="lede">
+    O modelo gerou imagem numa VM ARM sem GPU: 7 bilhões de parâmetros, sem placa nenhuma.
+    O que decide se isso vira produto é o custo por step. Os tempos abaixo foram medidos nesta
+    máquina, e o que é projeção está marcado no gráfico.
+  </p>
+
+  <div class="hero">
+    <div class="hero-grid">
+      <p class="bignum">129,74<span class="unit">s / step</span></p>
+      <div class="hero-note">
+        <p class="k">Tempo medido por step · 512×512</p>
+        <p>Uma imagem de 512² com 4 steps leva 13 minutos. No preset oficial
+        (1024², 25 steps) seriam ~3,6 horas.</p>
+      </div>
+    </div>
+  </div>
+
+  <h2>Configuração do teste</h2>
+  <dl class="cfg">
+    <dt>Plataforma</dt><dd>VM ARM64 (aarch64) <em>· sem GPU</em> <em>· 4 vCPU</em></dd>
+    <dt>Aceleração na CPU</dt><dd><span class="flag-no">bf16</span> &nbsp; <span class="flag-no">i8mm</span> &nbsp; <span class="flag-yes">asimd</span> &nbsp; <span class="flag-yes">crc32</span></dd>
+    <dt>RAM</dt><dd>23 GB <em>· pico de 5 GB na inferência</em></dd>
+    <dt>Disco (I/O sequencial)</dt><dd>~53 MB/s</dd>
+    <dt>Stack</dt><dd>ComfyUI <em>CPU</em> + ComfyUI-GGUF <em>fork leejet</em></dd>
+    <dt>Modelo</dt><dd>DiT 7B · GGUF Q4_K_M</dd>
+    <dt>Text encoder</dt><dd>Qwen3-VL 8B · w4a8 <em>(6,3 GB)</em></dd>
+    <dt>VAE</dt><dd>64 canais RGBA · bf16 <em>(0,68 GB)</em></dd>
+    <dt>Pesos totais</dt><dd>11,177 GB <em>· download 5 min 43 s</em></dd>
+    <dt>Amostragem</dt><dd>euler · simple · cfg 1 · cache int8</dd>
+  </dl>
+
+  <h2>Resultado medido</h2>
+  <div class="tiles">
+    <div class="tile">
+      <div class="v">13<span class="s">min</span></div>
+      <div class="l">ponta a ponta · 512² · 4 steps</div>
+    </div>
+    <div class="tile">
+      <div class="v">5<span class="s">GB</span></div>
+      <div class="l">RAM de pico · de 23 GB disponíveis</div>
+    </div>
+    <div class="tile">
+      <div class="v">8:38<span class="s">min</span></div>
+      <div class="l">só o sampling · + ~4 min de carga do disco</div>
+    </div>
+  </div>
+  <div class="tiles" style="margin-top:1px; grid-template-columns: repeat(3,1fr);">
+    <div class="tile">
+      <div class="v">512×512</div>
+      <div class="l">PNG RGBA · 368.906 bytes na saída</div>
+    </div>
+    <div class="tile">
+      <div class="v">0<span class="s">erros</span></div>
+      <div class="l">grafo aceito pelo servidor de primeira</div>
+    </div>
+    <div class="tile">
+      <div class="v">~800<span class="s">×</span></div>
+      <div class="l">atrás de uma GPU de consumo (~80 TFLOP/s fp16 vs ~0,1)</div>
+    </div>
+  </div>
+
+  <h2>Medido e simulado: minutos por imagem</h2>
+  <div class="chart">
+    <div class="row">
+      <div class="name">512² · 4 steps<span class="tag">MEDIDO</span></div>
+      <div class="bar-wrap"><div class="bar measured" style="width:47.7%"></div></div>
+      <div class="val">13 min</div>
+    </div>
+    <div class="row">
+      <div class="name">512² · 8 steps<span class="tag">SIMULADO</span></div>
+      <div class="bar-wrap"><div class="bar sim" style="width:56.6%"></div></div>
+      <div class="val">21 min</div>
+    </div>
+    <div class="row">
+      <div class="name">1024² · 4 steps<span class="tag">SIMULADO</span></div>
+      <div class="bar-wrap"><div class="bar sim" style="width:68.2%"></div></div>
+      <div class="val">39 min</div>
+    </div>
+    <div class="row">
+      <div class="name">1024² · 25 steps<span class="tag">SIMULADO · preset oficial</span></div>
+      <div class="bar-wrap"><div class="bar sim" style="width:100%"></div></div>
+      <div class="val">216 min <em>(3,6 h)</em></div>
+    </div>
+    <div class="axis">
+      <div></div>
+      <div class="ticks"><span>10s</span><span>1min</span><span>10min</span><span>1h</span><span>4h</span></div>
+      <div></div>
+    </div>
+  </div>
+  <div class="legend">
+    <span><i class="sw m"></i> medido nesta máquina</span>
+    <span><i class="sw s"></i> simulado a partir dele, em escala log: são piso, porque a atenção cresce mais rápido que os tokens</span>
+  </div>
+
+  <h2>Mesmo modelo, dois caminhos</h2>
+  <div class="vs">
+    <div class="item">
+      <div class="n">~13 min</div>
+      <div class="t">melhor caso local · 512² / 4 steps</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="item">
+      <div class="n">~10 s</div>
+      <div class="t">mesmo modelo via API hospedada</div>
+    </div>
+    <div class="arrow">=</div>
+    <div class="item">
+      <div class="n">~78×</div>
+      <div class="t">de diferença por imagem</div>
+    </div>
+  </div>
+
+  <footer>
+    <p>Rodar um modelo de 7B com resultado coerente fora de uma GPU é um avanço de eficiência.
+    O hardware, porém, ainda manda: sem unidades de tensor o produto de matrizes cai em fp32 puro,
+    e a difusão paga esse custo em cada step, porque não tem o cache que torna um LLM viável em CPU.</p>
+    <p>A quantização derrubou o consumo de 36-44 GB para um pico de 5 GB e não mudou a velocidade.
+    O gargalo nunca foi a RAM.</p>
+    <p>Licença: Qwen Research License, uso comercial restrito, independente de onde o modelo roda.</p>
+    <p class="stamp">Medido em 2026-09-21 · ARM64 sem GPU · ComfyUI + GGUF Q4_K_M · registro completo no repositório</p>
+  </footer>
+
+</div>
+</body>
+</html>
